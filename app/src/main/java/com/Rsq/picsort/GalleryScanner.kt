@@ -18,8 +18,16 @@ import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.max
@@ -35,6 +43,8 @@ class GalleryScanner(private val context: Context) {
         onProgress: (Int, Int) -> Unit,
     ): ScanResult = withContext(Dispatchers.IO) {
         val photos = if (folderUri != null) queryFolderPhotos(folderUri) else queryPhotos()
+        if (photos.isEmpty()) return@withContext ScanResult(emptyList(), emptyList())
+
         val options = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
@@ -42,45 +52,56 @@ class GalleryScanner(private val context: Context) {
         val detector = FaceDetection.getClient(options)
         val clusterer = FaceClusterer(threshold)
 
-        val descriptorCache = cacheManager.loadDescriptorCache()
-        var cacheUpdated = false
+        val descriptorCache = ConcurrentHashMap(cacheManager.loadDescriptorCache())
+        val cacheUpdated = AtomicBoolean(false)
+        val completedCount = AtomicInteger(0)
+
+        val concurrencyLimit = Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
+        val semaphore = Semaphore(concurrencyLimit)
 
         try {
-            photos.forEachIndexed { index, photo ->
-                val cacheKey = photo.uri.toString()
-                val cachedDescriptors = descriptorCache[cacheKey]
+            coroutineScope {
+                photos.map { photo ->
+                    async {
+                        semaphore.withPermit {
+                            val cacheKey = photo.uri.toString()
+                            val cachedDescriptors = descriptorCache[cacheKey]
 
-                if (cachedDescriptors != null) {
-                    cachedDescriptors.forEach { descriptor ->
-                        clusterer.add(descriptor, photo)
-                    }
-                } else {
-                    val bitmap: Bitmap? = runCatching<Bitmap?> {
-                        loadThumbnail(photo)
-                    }.getOrNull()
+                            if (cachedDescriptors != null) {
+                                cachedDescriptors.forEach { descriptor ->
+                                    clusterer.add(descriptor, photo)
+                                }
+                            } else {
+                                val bitmap: Bitmap? = runCatching<Bitmap?> {
+                                    loadThumbnail(photo)
+                                }.getOrNull()
 
-                    val newDescriptors = mutableListOf<FloatArray>()
-                    if (bitmap != null) {
-                        val faces: List<Face>? = runCatching<List<Face>> {
-                            detector.process(InputImage.fromBitmap(bitmap, 0)).await()
-                        }.getOrNull()
-                        faces?.forEach { face ->
-                            faceDescriptor(bitmap, face)?.let { descriptor ->
-                                clusterer.add(descriptor, photo)
-                                newDescriptors.add(descriptor)
+                                val newDescriptors = mutableListOf<FloatArray>()
+                                if (bitmap != null) {
+                                    val faces: List<Face>? = runCatching<List<Face>> {
+                                        detector.process(InputImage.fromBitmap(bitmap, 0)).await()
+                                    }.getOrNull()
+                                    faces?.forEach { face ->
+                                        faceDescriptor(bitmap, face)?.let { descriptor ->
+                                            clusterer.add(descriptor, photo)
+                                            newDescriptors.add(descriptor)
+                                        }
+                                    }
+                                }
+                                descriptorCache[cacheKey] = newDescriptors
+                                cacheUpdated.set(true)
+                            }
+
+                            val done = completedCount.incrementAndGet()
+                            if (done % 10 == 0 || done == photos.size) {
+                                withContext(Dispatchers.Main) { onProgress(done, photos.size) }
                             }
                         }
                     }
-                    descriptorCache[cacheKey] = newDescriptors
-                    cacheUpdated = true
-                }
-
-                if ((index + 1) % 10 == 0 || index + 1 == photos.size) {
-                    withContext(Dispatchers.Main) { onProgress(index + 1, photos.size) }
-                }
+                }.awaitAll()
             }
 
-            if (cacheUpdated) {
+            if (cacheUpdated.get()) {
                 cacheManager.saveDescriptorCache(descriptorCache)
             }
         } finally {

@@ -10,6 +10,7 @@ class FaceClusterer(private val threshold: Float = 0.82f) {
 
     private val clusters = mutableListOf<Cluster>()
 
+    @Synchronized
     fun add(descriptor: FloatArray, photo: GalleryPhoto) {
         var bestCluster: Cluster? = null
         var bestSimilarity = -1f
@@ -41,6 +42,7 @@ class FaceClusterer(private val threshold: Float = 0.82f) {
         }
     }
 
+    @Synchronized
     fun groups(): List<PersonGroup> = clusters
         .sortedByDescending { it.photos.size }
         .mapIndexed { index, cluster -> PersonGroup(index, cluster.photos.values.toList()) }
