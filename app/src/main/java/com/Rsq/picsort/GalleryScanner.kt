@@ -15,6 +15,7 @@ import androidx.core.graphics.scale
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +27,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.PI
@@ -46,23 +48,26 @@ class GalleryScanner(private val context: Context) {
         if (photos.isEmpty()) return@withContext ScanResult(emptyList(), emptyList())
 
         val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
             .build()
-        val detector = FaceDetection.getClient(options)
-        val clusterer = FaceClusterer(threshold)
 
+        val concurrencyLimit = Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
+        val detectorPool = ConcurrentLinkedQueue<FaceDetector>()
+
+        fun acquireDetector(): FaceDetector = detectorPool.poll() ?: FaceDetection.getClient(options)
+        fun releaseDetector(detector: FaceDetector) { detectorPool.offer(detector) }
+
+        val clusterer = FaceClusterer(threshold)
         val descriptorCache = ConcurrentHashMap(cacheManager.loadDescriptorCache())
         val cacheUpdated = AtomicBoolean(false)
         val completedCount = AtomicInteger(0)
-
-        val concurrencyLimit = Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
         val semaphore = Semaphore(concurrencyLimit)
 
         try {
             coroutineScope {
                 photos.map { photo ->
-                    async {
+                    async(Dispatchers.Default) {
                         semaphore.withPermit {
                             val cacheKey = photo.uri.toString()
                             val cachedDescriptors = descriptorCache[cacheKey]
@@ -78,9 +83,15 @@ class GalleryScanner(private val context: Context) {
 
                                 val newDescriptors = mutableListOf<FloatArray>()
                                 if (bitmap != null) {
-                                    val faces: List<Face>? = runCatching<List<Face>> {
+                                    val detector = acquireDetector()
+                                    val faces: List<Face>? = try {
                                         detector.process(InputImage.fromBitmap(bitmap, 0)).await()
-                                    }.getOrNull()
+                                    } catch (_: Exception) {
+                                        null
+                                    } finally {
+                                        releaseDetector(detector)
+                                    }
+
                                     faces?.forEach { face ->
                                         faceDescriptor(bitmap, face)?.let { descriptor ->
                                             clusterer.add(descriptor, photo)
@@ -105,7 +116,12 @@ class GalleryScanner(private val context: Context) {
                 cacheManager.saveDescriptorCache(descriptorCache)
             }
         } finally {
-            detector.close()
+            while (true) {
+                val d = detectorPool.poll() ?: break
+                try {
+                    d.close()
+                } catch (_: Exception) {}
+            }
         }
 
         ScanResult(photos, clusterer.groups())
@@ -115,12 +131,12 @@ class GalleryScanner(private val context: Context) {
         val resolver = context.contentResolver
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                resolver.loadThumbnail(photo.uri, Size(512, 512), null)
+                resolver.loadThumbnail(photo.uri, Size(320, 320), null)
             } else {
-                decodeSampledBitmapFromUri(resolver, photo.uri, 512, 512)
+                decodeSampledBitmapFromUri(resolver, photo.uri, 320, 320)
             }
         } catch (_: Exception) {
-            decodeSampledBitmapFromUri(resolver, photo.uri, 512, 512)
+            decodeSampledBitmapFromUri(resolver, photo.uri, 320, 320)
         }
     }
 
