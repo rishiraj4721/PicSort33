@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.MediaStore
@@ -71,6 +72,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -571,7 +573,11 @@ private fun SelectedPhotoDetailsCard(
         color = Mist,
         shape = RoundedCornerShape(12.dp)
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp)
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -592,17 +598,19 @@ private fun SelectedPhotoDetailsCard(
                     Spacer(Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            details.name,
+                            text = details.name,
                             color = Ink,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
-                            maxLines = 1
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            "${details.sizeString}  ·  ${details.resolutionString}",
+                            text = "${details.sizeString}  ·  ${details.resolutionString}",
                             color = Muted,
                             fontSize = 11.sp,
-                            maxLines = 1
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -618,8 +626,51 @@ private fun SelectedPhotoDetailsCard(
                 color = Leaf,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Medium,
-                maxLines = 2
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 15.sp,
+                modifier = Modifier.fillMaxWidth()
             )
+        }
+    }
+}
+
+private fun formatPhotoPath(rawPath: String): String {
+    if (rawPath.isBlank()) return "Unknown path"
+
+    if (!rawPath.startsWith("content://") && !rawPath.startsWith("file://")) {
+        val cleanPath = rawPath.replace("/storage/emulated/0/", "Internal Storage / ")
+        return cleanPath.replace("/", " / ")
+    }
+
+    val decoded = Uri.decode(rawPath)
+
+    return when {
+        decoded.contains("/document/primary:") -> {
+            val relPath = decoded.substringAfter("/document/primary:")
+            "Internal Storage / " + relPath.replace("/", " / ")
+        }
+        decoded.contains("/tree/primary:") -> {
+            val relPath = decoded.substringAfter("/tree/primary:")
+            "Internal Storage / " + relPath.replace("/", " / ")
+        }
+        decoded.contains("/document/") -> {
+            val docId = decoded.substringAfter("/document/")
+            if (docId.contains(":")) {
+                val volume = docId.substringBefore(":")
+                val relPath = docId.substringAfter(":")
+                val volumeName = if (volume.equals("primary", ignoreCase = true)) "Internal Storage" else volume
+                "$volumeName / " + relPath.replace("/", " / ")
+            } else {
+                docId.replace("/", " / ")
+            }
+        }
+        decoded.contains("media/external/images/media/") -> {
+            val id = decoded.substringAfterLast("/")
+            "MediaStore / Images / Photo #$id"
+        }
+        else -> {
+            decoded.substringAfter("://").replace("/", " / ")
         }
     }
 }
@@ -630,7 +681,7 @@ private fun getPhotoDetails(context: Context, photo: GalleryPhoto): PhotoDetails
     var sizeBytes: Long = 0
     var width = 0
     var height = 0
-    var path = photo.uri.toString()
+    var rawPath = photo.uri.toString()
 
     try {
         val projection = arrayOf(
@@ -664,7 +715,7 @@ private fun getPhotoDetails(context: Context, photo: GalleryPhoto): PhotoDetails
                 if (idxHeight != -1 && !cursor.isNull(idxHeight)) height = cursor.getInt(idxHeight)
                 if (idxData != -1 && !cursor.isNull(idxData)) {
                     val dataPath = cursor.getString(idxData)
-                    if (!dataPath.isNullOrEmpty()) path = dataPath
+                    if (!dataPath.isNullOrEmpty()) rawPath = dataPath
                 }
             }
         }
@@ -693,6 +744,7 @@ private fun getPhotoDetails(context: Context, photo: GalleryPhoto): PhotoDetails
         } catch (_: Exception) {}
     }
 
+    val formattedPath = formatPhotoPath(rawPath)
     val sizeStr = formatFileSize(sizeBytes)
     val resStr = if (width > 0 && height > 0) {
         val mp = (width.toDouble() * height.toDouble()) / 1_000_000.0
@@ -703,7 +755,7 @@ private fun getPhotoDetails(context: Context, photo: GalleryPhoto): PhotoDetails
         }
     } else "Unknown resolution"
 
-    return PhotoDetails(photo, name, path, sizeStr, resStr)
+    return PhotoDetails(photo, name, formattedPath, sizeStr, resStr)
 }
 
 private fun formatFileSize(bytes: Long): String {
