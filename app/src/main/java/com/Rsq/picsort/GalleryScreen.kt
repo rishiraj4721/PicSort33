@@ -4,12 +4,16 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.os.Build
+import android.provider.DocumentsContract
+import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +24,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -74,6 +79,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import java.util.Locale
 
 private val Canvas = Color(0xFFF1F4EE)
 private val Ink = Color(0xFF193229)
@@ -81,6 +87,14 @@ private val Leaf = Color(0xFF446B53)
 private val Coral = Color(0xFFD96D55)
 private val Mist = Color(0xFFE3E9DF)
 private val Muted = Color(0xFF66776C)
+
+data class PhotoDetails(
+    val photo: GalleryPhoto,
+    val name: String,
+    val path: String,
+    val sizeString: String,
+    val resolutionString: String,
+)
 
 @Composable
 fun GalleryScreen(viewModel: GalleryViewModel) {
@@ -93,13 +107,15 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var isMoveOperation by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
+    var selectedPhotoForDetails by remember { mutableStateOf<GalleryPhoto?>(null) }
 
     var selectedPhotoIds by remember(selectedGroup) {
         mutableStateOf(selectedGroup?.photos?.map { it.id }?.toSet() ?: emptySet())
     }
 
-    BackHandler(enabled = selectedGroup != null || showSettingsSheet || uiState.selectedFolderUri != null) {
+    BackHandler(enabled = selectedPhotoForDetails != null || selectedGroup != null || showSettingsSheet || uiState.selectedFolderUri != null) {
         when {
+            selectedPhotoForDetails != null -> selectedPhotoForDetails = null
             selectedGroup != null -> selectedGroup = null
             showSettingsSheet -> showSettingsSheet = false
             uiState.selectedFolderUri != null -> viewModel.clearSelectedFolder()
@@ -320,6 +336,13 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
             )
         }
 
+        if (selectedPhotoForDetails != null) {
+            SelectedPhotoDetailsCard(
+                photo = selectedPhotoForDetails!!,
+                onClose = { selectedPhotoForDetails = null }
+            )
+        }
+
         if (selectedGroup != null) {
             val totalInGroup = selectedGroup!!.photos.size
             val selectedCount = selectedPhotoIds.size
@@ -475,6 +498,7 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
             !uiState.hasScanned -> ScanState(uiState.completed, uiState.total)
             selectedGroup != null -> PhotoGrid(
                 photos = selectedGroup!!.photos,
+                selectedDetailPhotoId = selectedPhotoForDetails?.id,
                 selectable = true,
                 selectedIds = selectedPhotoIds,
                 onToggleSelect = { id ->
@@ -483,7 +507,8 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                     } else {
                         selectedPhotoIds + id
                     }
-                }
+                },
+                onPhotoClick = { photo -> selectedPhotoForDetails = photo }
             )
             selectedTab == 0 -> {
                 if (uiState.photos.isEmpty()) {
@@ -494,7 +519,11 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                         onPrimaryAction = { folderPickerLauncher.launch(null) },
                     )
                 } else {
-                    PhotoGrid(uiState.photos)
+                    PhotoGrid(
+                        photos = uiState.photos,
+                        selectedDetailPhotoId = selectedPhotoForDetails?.id,
+                        onPhotoClick = { photo -> selectedPhotoForDetails = photo }
+                    )
                 }
             }
             uiState.groups.isEmpty() -> EmptyState(
@@ -524,6 +553,169 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SelectedPhotoDetailsCard(
+    photo: GalleryPhoto,
+    onClose: () -> Unit,
+) {
+    val context = LocalContext.current
+    val details = remember(photo) { getPhotoDetails(context, photo) }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 22.dp, vertical = 6.dp),
+        color = Mist,
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    AsyncImage(
+                        model = photo.uri,
+                        contentDescription = details.name,
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color.White)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            details.name,
+                            color = Ink,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                        Text(
+                            "${details.sizeString}  ·  ${details.resolutionString}",
+                            color = Muted,
+                            fontSize = 11.sp,
+                            maxLines = 1
+                        )
+                    }
+                }
+                IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "Close details", tint = Ink, modifier = Modifier.size(16.dp))
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+
+            Text(
+                text = "Path: ${details.path}",
+                color = Leaf,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 2
+            )
+        }
+    }
+}
+
+private fun getPhotoDetails(context: Context, photo: GalleryPhoto): PhotoDetails {
+    val resolver = context.contentResolver
+    var name = ""
+    var sizeBytes: Long = 0
+    var width = 0
+    var height = 0
+    var path = photo.uri.toString()
+
+    try {
+        val projection = arrayOf(
+            MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.SIZE,
+            MediaStore.Images.Media.WIDTH,
+            MediaStore.Images.Media.HEIGHT,
+            MediaStore.Images.Media.DATA,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_SIZE,
+        )
+        resolver.query(photo.uri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idxName1 = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val idxName2 = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+                val idxSize1 = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                val idxSize2 = cursor.getColumnIndex(MediaStore.Images.Media.SIZE)
+                val idxWidth = cursor.getColumnIndex(MediaStore.Images.Media.WIDTH)
+                val idxHeight = cursor.getColumnIndex(MediaStore.Images.Media.HEIGHT)
+                val idxData = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+
+                val displayName1 = if (idxName1 != -1 && !cursor.isNull(idxName1)) cursor.getString(idxName1) else null
+                val displayName2 = if (idxName2 != -1 && !cursor.isNull(idxName2)) cursor.getString(idxName2) else null
+                name = displayName1 ?: displayName2 ?: ""
+
+                val size1 = if (idxSize1 != -1 && !cursor.isNull(idxSize1)) cursor.getLong(idxSize1) else 0L
+                val size2 = if (idxSize2 != -1 && !cursor.isNull(idxSize2)) cursor.getLong(idxSize2) else 0L
+                sizeBytes = if (size1 > 0) size1 else size2
+
+                if (idxWidth != -1 && !cursor.isNull(idxWidth)) width = cursor.getInt(idxWidth)
+                if (idxHeight != -1 && !cursor.isNull(idxHeight)) height = cursor.getInt(idxHeight)
+                if (idxData != -1 && !cursor.isNull(idxData)) {
+                    val dataPath = cursor.getString(idxData)
+                    if (!dataPath.isNullOrEmpty()) path = dataPath
+                }
+            }
+        }
+    } catch (_: Exception) {}
+
+    if (name.isEmpty()) {
+        name = "photo_${photo.id}.jpg"
+    }
+
+    if (sizeBytes <= 0) {
+        try {
+            resolver.openFileDescriptor(photo.uri, "r")?.use { pfd ->
+                sizeBytes = pfd.statSize
+            }
+        } catch (_: Exception) {}
+    }
+
+    if (width <= 0 || height <= 0) {
+        try {
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            resolver.openInputStream(photo.uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, options)
+            }
+            width = options.outWidth
+            height = options.outHeight
+        } catch (_: Exception) {}
+    }
+
+    val sizeStr = formatFileSize(sizeBytes)
+    val resStr = if (width > 0 && height > 0) {
+        val mp = (width.toDouble() * height.toDouble()) / 1_000_000.0
+        if (mp >= 0.1) {
+            "$width × $height (${String.format(Locale.US, "%.1f", mp)} MP)"
+        } else {
+            "$width × $height"
+        }
+    } else "Unknown resolution"
+
+    return PhotoDetails(photo, name, path, sizeStr, resStr)
+}
+
+private fun formatFileSize(bytes: Long): String {
+    if (bytes <= 0) return "Unknown size"
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    val gb = mb / 1024.0
+    return when {
+        gb >= 1.0 -> String.format(Locale.US, "%.2f GB", gb)
+        mb >= 1.0 -> String.format(Locale.US, "%.1f MB", mb)
+        kb >= 1.0 -> String.format(Locale.US, "%.0f KB", kb)
+        else -> "$bytes bytes"
     }
 }
 
@@ -558,9 +750,11 @@ private fun TabChoice(
 @Composable
 private fun PhotoGrid(
     photos: List<GalleryPhoto>,
+    selectedDetailPhotoId: Long? = null,
     selectable: Boolean = false,
     selectedIds: Set<Long> = emptySet(),
     onToggleSelect: (Long) -> Unit = {},
+    onPhotoClick: (GalleryPhoto) -> Unit = {},
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
@@ -569,17 +763,25 @@ private fun PhotoGrid(
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         items(photos, key = { it.id }) { photo ->
-            val isSelected = photo.id in selectedIds
+            val isSelectedForExport = photo.id in selectedIds
+            val isSelectedForDetails = photo.id == selectedDetailPhotoId
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
                     .clip(RoundedCornerShape(4.dp))
                     .then(
-                        if (selectable) {
-                            Modifier.clickable { onToggleSelect(photo.id) }
+                        if (isSelectedForDetails) {
+                            Modifier.border(2.dp, Coral, RoundedCornerShape(4.dp))
                         } else Modifier
                     )
+                    .clickable {
+                        onPhotoClick(photo)
+                        if (selectable) {
+                            onToggleSelect(photo.id)
+                        }
+                    }
             ) {
                 AsyncImage(
                     model = photo.uri,
@@ -590,14 +792,14 @@ private fun PhotoGrid(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(if (isSelected) Color.Black.copy(alpha = 0.2f) else Color.Transparent)
+                            .background(if (isSelectedForExport) Color.Black.copy(alpha = 0.2f) else Color.Transparent)
                             .padding(6.dp),
                         contentAlignment = Alignment.TopEnd
                     ) {
                         Icon(
-                            imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                            contentDescription = if (isSelected) "Selected" else "Not selected",
-                            tint = if (isSelected) Coral else Color.White.copy(alpha = 0.8f),
+                            imageVector = if (isSelectedForExport) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                            contentDescription = if (isSelectedForExport) "Selected" else "Not selected",
+                            tint = if (isSelectedForExport) Coral else Color.White.copy(alpha = 0.8f),
                             modifier = Modifier.size(20.dp)
                         )
                     }
