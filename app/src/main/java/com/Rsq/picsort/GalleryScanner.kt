@@ -16,6 +16,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.face.FaceLandmark
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
@@ -30,13 +31,13 @@ class GalleryScanner(private val context: Context) {
 
     suspend fun scan(
         folderUri: Uri? = null,
-        threshold: Float = 0.78f,
+        threshold: Float = 0.82f,
         onProgress: (Int, Int) -> Unit,
     ): ScanResult = withContext(Dispatchers.IO) {
         val photos = if (folderUri != null) queryFolderPhotos(folderUri) else queryPhotos()
         val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
             .build()
         val detector = FaceDetection.getClient(options)
         val clusterer = FaceClusterer(threshold)
@@ -64,7 +65,7 @@ class GalleryScanner(private val context: Context) {
                             detector.process(InputImage.fromBitmap(bitmap, 0)).await()
                         }.getOrNull()
                         faces?.forEach { face ->
-                            faceDescriptor(bitmap, face.boundingBox)?.let { descriptor ->
+                            faceDescriptor(bitmap, face)?.let { descriptor ->
                                 clusterer.add(descriptor, photo)
                                 newDescriptors.add(descriptor)
                             }
@@ -190,46 +191,78 @@ class GalleryScanner(private val context: Context) {
         }
     }
 
-    private fun faceDescriptor(bitmap: Bitmap, bounds: Rect): FloatArray? {
-        val paddingX = (bounds.width() * 0.16f).toInt()
-        val paddingY = (bounds.height() * 0.16f).toInt()
+    private fun faceDescriptor(bitmap: Bitmap, face: Face): FloatArray? {
+        val bounds = face.boundingBox
+        val paddingX = (bounds.width() * 0.15f).toInt()
+        val paddingY = (bounds.height() * 0.15f).toInt()
         val left = max(0, bounds.left - paddingX)
         val top = max(0, bounds.top - paddingY)
         val right = min(bitmap.width, bounds.right + paddingX)
         val bottom = min(bitmap.height, bounds.bottom + paddingY)
-        if (right - left < 12 || bottom - top < 12) return null
+        if (right - left < 16 || bottom - top < 16) return null
 
-        val face = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-        val normalized = face.scale(16, 16, filter = true)
-        val pixels = IntArray(256)
-        normalized.getPixels(pixels, 0, 16, 0, 0, 16, 16)
-        val gray = FloatArray(256) { index ->
+        val geoFeatures = extractGeometricFeatures(face, bounds)
+
+        val faceCrop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+        val scaled = faceCrop.scale(32, 32, filter = true)
+        val pixels = IntArray(1024)
+        scaled.getPixels(pixels, 0, 32, 0, 0, 32, 32)
+
+        val gray = FloatArray(1024) { index ->
             val color = pixels[index]
             (0.299f * ((color shr 16) and 0xff) +
                 0.587f * ((color shr 8) and 0xff) +
                 0.114f * (color and 0xff)) / 255f
         }
 
-        val mean = gray.average().toFloat()
-        val deviation = sqrt(gray.sumOf { ((it - mean) * (it - mean)).toDouble() } / gray.size)
-            .toFloat()
-            .coerceAtLeast(0.04f)
-        val intensity = FloatArray(gray.size) { (gray[it] - mean) / deviation }
-        val histograms = FloatArray(4 * 4 * 8)
-        for (y in 1 until 15) {
-            for (x in 1 until 15) {
-                val dx = gray[y * 16 + x + 1] - gray[y * 16 + x - 1]
-                val dy = gray[(y + 1) * 16 + x] - gray[(y - 1) * 16 + x]
+        val hog = FloatArray(8 * 8 * 8)
+        for (y in 1 until 31) {
+            for (x in 1 until 31) {
+                val dx = gray[y * 32 + x + 1] - gray[y * 32 + x - 1]
+                val dy = gray[(y + 1) * 32 + x] - gray[(y - 1) * 32 + x]
                 val magnitude = sqrt(dx * dx + dy * dy)
                 val angle = (atan2(dy, dx) + PI.toFloat()) % PI.toFloat()
                 val bin = (angle / PI.toFloat() * 8).toInt().coerceIn(0, 7)
-                val cell = ((y / 4) * 4 + x / 4) * 8 + bin
-                histograms[cell] += magnitude
+                val cell = ((y / 4) * 8 + x / 4) * 8 + bin
+                hog[cell] += magnitude
             }
         }
 
-        val descriptor = intensity + histograms
-        val length = sqrt(descriptor.sumOf { (it * it).toDouble() }).toFloat().coerceAtLeast(0.001f)
-        return FloatArray(descriptor.size) { descriptor[it] / length }
+        val rawDescriptor = geoFeatures + hog
+        val length = sqrt(rawDescriptor.sumOf { (it * it).toDouble() }).toFloat().coerceAtLeast(0.001f)
+        return FloatArray(rawDescriptor.size) { rawDescriptor[it] / length }
+    }
+
+    private fun extractGeometricFeatures(face: Face, bounds: Rect): FloatArray {
+        val geo = FloatArray(16)
+        val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
+        val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
+        val nose = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
+        val mouthLeft = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
+        val mouthRight = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
+
+        if (leftEye != null && rightEye != null && nose != null && mouthLeft != null && mouthRight != null) {
+            val eyeDist = distance(leftEye.x, leftEye.y, rightEye.x, rightEye.y).coerceAtLeast(1f)
+            val eyeCenterX = (leftEye.x + rightEye.x) / 2f
+            val eyeCenterY = (leftEye.y + rightEye.y) / 2f
+            val mouthCenterX = (mouthLeft.x + mouthRight.x) / 2f
+            val mouthCenterY = (mouthLeft.y + mouthRight.y) / 2f
+
+            geo[0] = distance(eyeCenterX, eyeCenterY, nose.x, nose.y) / eyeDist
+            geo[1] = distance(nose.x, nose.y, mouthCenterX, mouthCenterY) / eyeDist
+            geo[2] = distance(mouthLeft.x, mouthLeft.y, mouthRight.x, mouthRight.y) / eyeDist
+            geo[3] = distance(leftEye.x, leftEye.y, nose.x, nose.y) / eyeDist
+            geo[4] = distance(rightEye.x, rightEye.y, nose.x, nose.y) / eyeDist
+            geo[5] = distance(leftEye.x, leftEye.y, mouthLeft.x, mouthLeft.y) / eyeDist
+            geo[6] = distance(rightEye.x, rightEye.y, mouthRight.x, mouthRight.y) / eyeDist
+            geo[7] = bounds.width().toFloat() / bounds.height().toFloat()
+        }
+        return geo
+    }
+
+    private fun distance(x1: Float, y1: Float, x2: Float, y2: Float): Float {
+        val dx = x2 - x1
+        val dy = y2 - y1
+        return sqrt(dx * dx + dy * dy)
     }
 }

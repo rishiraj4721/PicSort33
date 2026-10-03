@@ -10,11 +10,11 @@ class ScanCacheManager(private val context: Context) {
 
     private fun getCacheFile(sourceKey: String): File {
         val safeKey = sourceKey.hashCode().toString()
-        return File(context.filesDir, "scan_cache_$safeKey.json")
+        return File(context.filesDir, "scan_cache_v2_$safeKey.json")
     }
 
     private fun getDescriptorCacheFile(): File {
-        return File(context.cacheDir, "descriptors_cache.json")
+        return File(context.cacheDir, "descriptors_cache_v2.json")
     }
 
     fun loadScanResult(sourceKey: String): ScanResult? {
@@ -150,7 +150,7 @@ class ScanCacheManager(private val context: Context) {
     fun clearAllCache() {
         try {
             context.filesDir.listFiles()?.forEach { file ->
-                if (file.name.startsWith("scan_cache_")) {
+                if (file.name.startsWith("scan_cache")) {
                     file.delete()
                 }
             }
