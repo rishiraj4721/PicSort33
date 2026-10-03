@@ -206,6 +206,7 @@ class GalleryViewModel(
             var successCount = 0
             val resolver = application.contentResolver
             val failedToDeleteUris = mutableListOf<Uri>()
+            val successfullyMovedPhotoIds = mutableSetOf<Long>()
 
             try {
                 val rootDocId = if (DocumentsContract.isTreeUri(destinationTreeUri)) {
@@ -230,16 +231,20 @@ class GalleryViewModel(
                             successCount++
 
                             if (deleteOriginals) {
-                                try {
+                                val deleted = try {
                                     if (DocumentsContract.isDocumentUri(application, photo.uri)) {
                                         DocumentsContract.deleteDocument(resolver, photo.uri)
                                     } else {
-                                        val deleted = resolver.delete(photo.uri, null, null)
-                                        if (deleted == 0) {
-                                            failedToDeleteUris.add(photo.uri)
-                                        }
+                                        val rows = resolver.delete(photo.uri, null, null)
+                                        rows > 0
                                     }
                                 } catch (_: Exception) {
+                                    false
+                                }
+
+                                if (deleted) {
+                                    successfullyMovedPhotoIds.add(photo.id)
+                                } else {
                                     failedToDeleteUris.add(photo.uri)
                                 }
                             }
@@ -271,12 +276,28 @@ class GalleryViewModel(
                     }
                 }
 
+                // If photos were moved/deleted, update UI and cache in-memory without scanning
+                if (deleteOriginals && successfullyMovedPhotoIds.isNotEmpty()) {
+                    val updatedPhotos = _uiState.value.photos.filterNot { it.id in successfullyMovedPhotoIds }
+                    val updatedGroups = _uiState.value.groups.mapNotNull { group ->
+                        val remaining = group.photos.filterNot { it.id in successfullyMovedPhotoIds }
+                        if (remaining.isNotEmpty()) group.copy(photos = remaining) else null
+                    }
+
+                    _uiState.update {
+                        it.copy(
+                            photos = updatedPhotos,
+                            groups = updatedGroups,
+                        )
+                    }
+
+                    val sourceKey = _uiState.value.selectedFolderUri?.toString() ?: "all_photos"
+                    cacheManager.saveScanResult(sourceKey, ScanResult(updatedPhotos, updatedGroups))
+                }
+
                 _uiState.update {
                     it.copy(exportState = ExportState(isExporting = false, message = resultMessage))
                 }
-
-                cacheManager.clearAllCache()
-                scan()
 
             } catch (e: Exception) {
                 _uiState.update {
