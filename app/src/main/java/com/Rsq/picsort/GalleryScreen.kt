@@ -31,8 +31,10 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -114,6 +116,10 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
     var selectedPhotoIds by remember(selectedGroup) {
         mutableStateOf(selectedGroup?.photos?.map { it.id }?.toSet() ?: emptySet())
     }
+
+    val photosGridState = rememberLazyGridState()
+    val groupsGridState = rememberLazyGridState()
+    val selectedGroupGridState = remember(selectedGroup?.id) { LazyGridState() }
 
     BackHandler(enabled = selectedPhotoForDetails != null || selectedGroup != null || showSettingsSheet || uiState.selectedFolderUri != null) {
         when {
@@ -510,7 +516,8 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                         selectedPhotoIds + id
                     }
                 },
-                onPhotoClick = { photo -> selectedPhotoForDetails = photo }
+                onPhotoClick = { photo -> selectedPhotoForDetails = photo },
+                gridState = selectedGroupGridState,
             )
             selectedTab == 0 -> {
                 if (uiState.photos.isEmpty()) {
@@ -524,7 +531,8 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                     PhotoGrid(
                         photos = uiState.photos,
                         selectedDetailPhotoId = selectedPhotoForDetails?.id,
-                        onPhotoClick = { photo -> selectedPhotoForDetails = photo }
+                        onPhotoClick = { photo -> selectedPhotoForDetails = photo },
+                        gridState = photosGridState,
                     )
                 }
             }
@@ -544,6 +552,7 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                     fontSize = 12.sp,
                 )
                 LazyVerticalGrid(
+                    state = groupsGridState,
                     columns = GridCells.Fixed(2),
                     contentPadding = PaddingValues(start = 22.dp, end = 22.dp, bottom = 24.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -807,8 +816,10 @@ private fun PhotoGrid(
     selectedIds: Set<Long> = emptySet(),
     onToggleSelect: (Long) -> Unit = {},
     onPhotoClick: (GalleryPhoto) -> Unit = {},
+    gridState: LazyGridState = rememberLazyGridState(),
 ) {
     LazyVerticalGrid(
+        state = gridState,
         columns = GridCells.Fixed(3),
         contentPadding = PaddingValues(start = 22.dp, end = 22.dp, bottom = 24.dp),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
