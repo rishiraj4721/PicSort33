@@ -309,28 +309,28 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
             }
         }
 
-        Text(
-            text = selectedGroup?.let { "Person ${it.id + 1}" }
-                ?: if (selectedTab == 0) "Your whole\nphoto story." else "Faces,\nfamiliar again.",
-            modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 8.dp),
-            color = Ink,
-            fontSize = 34.sp,
-            lineHeight = 37.sp,
-            fontFamily = FontFamily.Serif,
-        )
+//        Text(
+//            text = selectedGroup?.let { "Person ${it.id + 1}" }
+//                ?: if (selectedTab == 0) "Your whole\nphoto story." else "Faces,\nfamiliar again.",
+//            modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 8.dp),
+//            color = Ink,
+//            fontSize = 34.sp,
+//            lineHeight = 37.sp,
+//            fontFamily = FontFamily.Serif,
+//        )
 
-        val sourceText = when {
-            selectedGroup != null -> "${selectedPhotoIds.size} of ${selectedGroup!!.photos.size} selected"
-            uiState.selectedFolderUri != null -> "Folder: ${uiState.selectedFolderName ?: "Selected Folder"} (recursive)"
-            selectedTab == 0 -> "A little order for your camera roll."
-            else -> "People spotted across your photos."
-        }
-        Text(
-            text = sourceText,
-            modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 8.dp),
-            color = Muted,
-            fontSize = 14.sp,
-        )
+//        val sourceText = when {
+//            selectedGroup != null -> "${selectedPhotoIds.size} of ${selectedGroup!!.photos.size} selected"
+//            uiState.selectedFolderUri != null -> "Folder: ${uiState.selectedFolderName ?: "Selected Folder"} (recursive)"
+//            selectedTab == 0 -> "A little order for your camera roll."
+//            else -> "People spotted across your photos."
+//        }
+//        Text(
+//            text = sourceText,
+//            modifier = Modifier.padding(start = 22.dp, end = 22.dp, top = 8.dp),
+//            color = Muted,
+//            fontSize = 14.sp,
+//        )
 
         if (uiState.selectedFolderUri != null && permissionGranted && selectedGroup == null) {
             Text(
@@ -546,7 +546,7 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
             )
             else -> {
                 Text(
-                    "Possible matches · on-device estimate",
+                    "Possible matches · on-device estimate count: " + (uiState.groups.size.toString()),
                     modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 12.dp),
                     color = Muted,
                     fontSize = 12.sp,
