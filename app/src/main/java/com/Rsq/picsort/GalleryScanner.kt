@@ -32,12 +32,26 @@ class GalleryScanner(
         apiKey: String,
         threshold: Float = 0.45f,
         clusteringAlgo: String = "chinese_whispers",
-        onProgress: (Int, Int) -> Unit,
+        onProgress: (completed: Int, total: Int, photos: List<GalleryPhoto>, groups: List<PersonGroup>) -> Unit,
     ): ScanResult = withContext(Dispatchers.IO) {
         val photos = if (folderUri != null) queryFolderPhotos(folderUri) else queryPhotos()
-        if (photos.isEmpty()) return@withContext ScanResult(emptyList(), emptyList())
+        if (photos.isEmpty()) {
+            withContext(Dispatchers.Main) {
+                onProgress(0, 0, emptyList(), emptyList())
+            }
+            return@withContext ScanResult(emptyList(), emptyList())
+        }
 
         val descriptorCache = ConcurrentHashMap(cacheManager.loadDescriptorCache())
+
+        // Initial reclustered groups from cache if available
+        val currentGroups = reclusterInternal(photos, descriptorCache, serverUrl, apiKey, threshold, clusteringAlgo) ?: emptyList()
+
+        // Notify initial discovery of photos & cached groups immediately
+        withContext(Dispatchers.Main) {
+            onProgress(0, photos.size, photos, currentGroups)
+        }
+
         val missingPhotos = photos.filter { !descriptorCache.containsKey(it.uri.toString()) }
 
         // Fail fast if server is offline when we need to analyze new photos
@@ -51,6 +65,9 @@ class GalleryScanner(
                 }
                 throw java.io.IOException(msg, e)
             }
+        } else {
+            // All photos are already cached and initial groups emitted
+            return@withContext ScanResult(photos, currentGroups)
         }
 
         val cacheUpdated = AtomicBoolean(false)
@@ -85,7 +102,9 @@ class GalleryScanner(
 
                         val done = completedCount.incrementAndGet()
                         if (done % 5 == 0 || done == photos.size) {
-                            withContext(Dispatchers.Main) { onProgress(done, photos.size) }
+                            withContext(Dispatchers.Main) {
+                                onProgress(done, photos.size, photos, currentGroups)
+                            }
                         }
                     }
                 }
@@ -96,8 +115,11 @@ class GalleryScanner(
             cacheManager.saveDescriptorCache(descriptorCache)
         }
 
-        val groups = recluster(photos, descriptorCache, serverUrl, apiKey, threshold, clusteringAlgo)
-        ScanResult(photos, groups)
+        val finalGroups = reclusterInternal(photos, descriptorCache, serverUrl, apiKey, threshold, clusteringAlgo) ?: currentGroups
+        withContext(Dispatchers.Main) {
+            onProgress(photos.size, photos.size, photos, finalGroups)
+        }
+        ScanResult(photos, finalGroups)
     }
 
     suspend fun recluster(
@@ -108,17 +130,17 @@ class GalleryScanner(
         clusteringAlgo: String,
     ): List<PersonGroup> = withContext(Dispatchers.IO) {
         val descriptorCache = cacheManager.loadDescriptorCache()
-        recluster(photos, descriptorCache, serverUrl, apiKey, threshold, clusteringAlgo)
+        reclusterInternal(photos, descriptorCache, serverUrl, apiKey, threshold, clusteringAlgo) ?: emptyList()
     }
 
-    private suspend fun recluster(
+    private suspend fun reclusterInternal(
         photos: List<GalleryPhoto>,
         descriptorCache: Map<String, List<FloatArray>>,
         serverUrl: String,
         apiKey: String,
         threshold: Float,
         clusteringAlgo: String,
-    ): List<PersonGroup> = withContext(Dispatchers.IO) {
+    ): List<PersonGroup>? = withContext(Dispatchers.IO) {
         val allEmbeddings = mutableListOf<FloatArray>()
         val photoIndices = mutableListOf<GalleryPhoto>()
 
@@ -144,7 +166,7 @@ class GalleryScanner(
             )
         } catch (e: Exception) {
             e.printStackTrace()
-            return@withContext emptyList()
+            return@withContext null
         }
 
         val groupMap = mutableMapOf<Int, LinkedHashMap<Long, GalleryPhoto>>()

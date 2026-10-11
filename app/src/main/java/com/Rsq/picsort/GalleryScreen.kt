@@ -227,7 +227,6 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = { showSettingsSheet = !showSettingsSheet },
-                        enabled = !uiState.isScanning,
                     ) {
                         Icon(
                             Icons.Default.Tune,
@@ -237,7 +236,6 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                     }
                     IconButton(
                         onClick = { folderPickerLauncher.launch(null) },
-                        enabled = !uiState.isScanning,
                     ) {
                         Icon(
                             Icons.Default.FolderOpen,
@@ -245,8 +243,16 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                             tint = if (uiState.selectedFolderUri != null) Coral else Ink,
                         )
                     }
-                    IconButton(onClick = viewModel::scan, enabled = hasAccess && !uiState.isScanning) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Rescan photos", tint = Ink)
+                    IconButton(onClick = viewModel::scan, enabled = hasAccess) {
+                        if (uiState.isScanning) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = Leaf,
+                            )
+                        } else {
+                            Icon(Icons.Default.Refresh, contentDescription = "Rescan photos", tint = Ink)
+                        }
                     }
                 }
             }
@@ -596,6 +602,48 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
             }
         }
 
+        if (uiState.isScanning) {
+            BackgroundScanBanner(
+                completed = uiState.completed,
+                total = uiState.total,
+                groupsCount = uiState.groups.size,
+            )
+        }
+
+        if (uiState.hasError && uiState.photos.isNotEmpty()) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 22.dp, vertical = 6.dp),
+                color = Coral.copy(alpha = 0.15f),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.Error, contentDescription = null, tint = Coral, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = uiState.errorMessage ?: "Error scanning with server",
+                            color = Ink,
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    TextButton(onClick = viewModel::scan) {
+                        Text("Retry", fontSize = 12.sp, color = Coral, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
         when {
             !hasAccess -> EmptyState(
                 title = "Your photos stay yours.",
@@ -605,8 +653,7 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                 secondaryAction = "Select a folder",
                 onSecondaryAction = { folderPickerLauncher.launch(null) },
             )
-            uiState.isScanning -> ScanState(uiState.completed, uiState.total)
-            uiState.hasError -> EmptyState(
+            uiState.hasError && uiState.photos.isEmpty() -> EmptyState(
                 title = "Couldn't scan photos.",
                 message = uiState.errorMessage ?: "Check server connection and settings, then try again.",
                 primaryAction = "Try again",
@@ -614,7 +661,7 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                 secondaryAction = "Server Settings",
                 onSecondaryAction = { showSettingsSheet = true },
             )
-            !uiState.hasScanned -> ScanState(uiState.completed, uiState.total)
+            !uiState.hasScanned && uiState.photos.isEmpty() -> ScanState(uiState.completed, uiState.total)
             selectedGroup != null -> PhotoGrid(
                 photos = selectedGroup!!.photos,
                 selectedDetailPhotoId = selectedPhotoForDetails?.id,
@@ -632,12 +679,16 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
             )
             selectedTab == 0 -> {
                 if (uiState.photos.isEmpty()) {
-                    EmptyState(
-                        title = "No photos found.",
-                        message = if (uiState.selectedFolderUri != null) "No images found in the selected folder or its subfolders." else "Images on this device will show up here.",
-                        primaryAction = "Select another folder",
-                        onPrimaryAction = { folderPickerLauncher.launch(null) },
-                    )
+                    if (uiState.isScanning) {
+                        ScanState(uiState.completed, uiState.total)
+                    } else {
+                        EmptyState(
+                            title = "No photos found.",
+                            message = if (uiState.selectedFolderUri != null) "No images found in the selected folder or its subfolders." else "Images on this device will show up here.",
+                            primaryAction = "Select another folder",
+                            onPrimaryAction = { folderPickerLauncher.launch(null) },
+                        )
+                    }
                 } else {
                     PhotoGrid(
                         photos = uiState.photos,
@@ -647,30 +698,40 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                     )
                 }
             }
-            uiState.groups.isEmpty() -> EmptyState(
-                title = "No faces found yet.",
-                message = "Try another scan after adding a few photos with people in them.",
-                primaryAction = "Rescan",
-                onPrimaryAction = viewModel::scan,
-                secondaryAction = "Select another folder",
-                onSecondaryAction = { folderPickerLauncher.launch(null) },
-            )
             else -> {
-                Text(
-                    "Possible matches · on-device estimate count: " + (uiState.groups.size.toString()),
-                    modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 12.dp),
-                    color = Muted,
-                    fontSize = 12.sp,
-                )
-                LazyVerticalGrid(
-                    state = groupsGridState,
-                    columns = GridCells.Fixed(2),
-                    contentPadding = PaddingValues(start = 22.dp, end = 22.dp, bottom = 24.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    items(uiState.groups, key = { it.id }) { group ->
-                        GroupTile(group) { selectedGroup = group }
+                if (uiState.groups.isEmpty()) {
+                    if (uiState.isScanning) {
+                        EmptyState(
+                            title = "Analyzing faces...",
+                            message = if (uiState.total > 0) "Looking for faces across ${uiState.completed} of ${uiState.total} photos..." else "Finding photos to analyze...",
+                        )
+                    } else {
+                        EmptyState(
+                            title = "No faces found yet.",
+                            message = "Try another scan after adding a few photos with people in them.",
+                            primaryAction = "Rescan",
+                            onPrimaryAction = viewModel::scan,
+                            secondaryAction = "Select another folder",
+                            onSecondaryAction = { folderPickerLauncher.launch(null) },
+                        )
+                    }
+                } else {
+                    Text(
+                        text = "Possible matches · ${uiState.groups.size} people found",
+                        modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 12.dp),
+                        color = Muted,
+                        fontSize = 12.sp,
+                    )
+                    LazyVerticalGrid(
+                        state = groupsGridState,
+                        columns = GridCells.Fixed(2),
+                        contentPadding = PaddingValues(start = 22.dp, end = 22.dp, bottom = 24.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        items(uiState.groups, key = { it.id }) { group ->
+                            GroupTile(group) { selectedGroup = group }
+                        }
                     }
                 }
             }
@@ -1011,6 +1072,71 @@ private fun GroupTile(group: PersonGroup, onClick: () -> Unit) {
             color = Muted,
             fontSize = 12.sp,
         )
+    }
+}
+
+@Composable
+private fun BackgroundScanBanner(
+    completed: Int,
+    total: Int,
+    groupsCount: Int,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 22.dp, vertical = 6.dp),
+        color = Mist,
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    CircularProgressIndicator(
+                        color = Coral,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = when {
+                            total == 0 -> "Finding photos..."
+                            completed < total -> "Analyzing faces ($completed of $total)"
+                            else -> "Clustering faces..."
+                        },
+                        color = Ink,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                if (groupsCount > 0) {
+                    Text(
+                        text = "$groupsCount people found",
+                        color = Leaf,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            if (total > 0) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { completed.toFloat() / total },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = Leaf,
+                    trackColor = Color.White,
+                )
+            }
+        }
     }
 }
 

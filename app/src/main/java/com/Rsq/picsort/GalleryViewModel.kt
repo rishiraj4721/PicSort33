@@ -14,6 +14,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -219,9 +220,7 @@ class GalleryViewModel(
                 hasScanned = cachedResult != null,
             )
         }
-        if (cachedResult == null) {
-            scan()
-        }
+        scan()
     }
 
     fun clearSelectedFolder() {
@@ -236,13 +235,13 @@ class GalleryViewModel(
                 hasScanned = cachedResult != null,
             )
         }
-        if (cachedResult == null) {
-            scan()
-        }
+        scan()
     }
 
+    private var scanJob: Job? = null
+
     fun scan() {
-        if (_uiState.value.isScanning) return
+        scanJob?.cancel()
 
         val folderUri = _uiState.value.selectedFolderUri
         val threshold = _uiState.value.similarityThreshold
@@ -251,7 +250,7 @@ class GalleryViewModel(
         val algo = _uiState.value.clusteringAlgo
         val sourceKey = folderUri?.toString() ?: "all_photos"
 
-        viewModelScope.launch {
+        scanJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     isScanning = true,
@@ -268,9 +267,18 @@ class GalleryViewModel(
                     apiKey = apiKey,
                     threshold = threshold,
                     clusteringAlgo = algo,
-                ) { completed, total ->
-                    _uiState.update { it.copy(completed = completed, total = total) }
-                }
+                    onProgress = { completed, total, currentPhotos, currentGroups ->
+                        _uiState.update {
+                            it.copy(
+                                completed = completed,
+                                total = total,
+                                photos = currentPhotos,
+                                groups = currentGroups,
+                                hasScanned = true,
+                            )
+                        }
+                    }
+                )
 
                 cacheManager.saveScanResult(sourceKey, result)
                 _uiState.update {
