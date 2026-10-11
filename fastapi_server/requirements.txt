@@ -1,0 +1,8 @@
+fastapi[standard]
+opencv-python
+numpy
+pydantic
+scikit-learn
+insightface
+python-dotenv
+onnxruntime-gpu
