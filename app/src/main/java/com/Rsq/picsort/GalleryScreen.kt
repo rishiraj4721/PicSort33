@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DriveFolderUpload
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
@@ -54,10 +55,13 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -263,9 +267,9 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "Face Matching Threshold",
+                            "Server & Matching Settings",
                             color = Ink,
-                            fontSize = 14.sp,
+                            fontSize = 15.sp,
                             fontWeight = FontWeight.Bold
                         )
                         IconButton(onClick = { showSettingsSheet = false }, modifier = Modifier.size(24.dp)) {
@@ -273,31 +277,138 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
                         }
                     }
 
-                    Text(
-                        "Lower values group different angles/photos of the same person together.",
-                        color = Muted,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
+                    Spacer(Modifier.height(8.dp))
+
+                    Text("Server URL", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    OutlinedTextField(
+                        value = uiState.serverUrl,
+                        onValueChange = { viewModel.setServerUrl(it) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 2.dp, bottom = 6.dp),
+                        singleLine = true,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White,
+                            focusedBorderColor = Leaf,
+                            unfocusedBorderColor = Muted,
+                        )
                     )
 
+                    Text("API Key (Optional)", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    OutlinedTextField(
+                        value = uiState.apiKey,
+                        onValueChange = { viewModel.setApiKey(it) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 2.dp, bottom = 8.dp),
+                        singleLine = true,
+                        placeholder = { Text("X-API-Key header", fontSize = 12.sp, color = Muted) },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White,
+                            focusedBorderColor = Leaf,
+                            unfocusedBorderColor = Muted,
+                        )
+                    )
+
+                    // Connection Health Card
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        color = Color.White,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                if (uiState.serverHealth.isLoading) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Leaf)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Checking server...", fontSize = 12.sp, color = Ink)
+                                } else if (uiState.serverHealth.isConnected) {
+                                    Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Leaf, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Column {
+                                        Text("Server Connected", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Leaf)
+                                        Text(
+                                            "${uiState.serverHealth.detector} / ${uiState.serverHealth.embedder} (${uiState.serverHealth.embeddingDim}d)",
+                                            fontSize = 11.sp,
+                                            color = Muted
+                                        )
+                                    }
+                                } else {
+                                    Icon(Icons.Default.Error, contentDescription = null, tint = Coral, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Column {
+                                        Text("Server Unreachable", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Coral)
+                                        Text(
+                                            uiState.serverHealth.errorMessage ?: "Connection failed",
+                                            fontSize = 11.sp,
+                                            color = Muted,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                            TextButton(onClick = { viewModel.checkServerConnection() }) {
+                                Text("Check", fontSize = 12.sp, color = Leaf, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    Text("Clustering Algorithm", color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp, bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        uiState.availableAlgos.forEach { algo ->
+                            val isSelected = uiState.clusteringAlgo == algo
+                            Button(
+                                onClick = { viewModel.setClusteringAlgo(algo) },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isSelected) Leaf else Color.White,
+                                    contentColor = if (isSelected) Color.White else Ink,
+                                ),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Text(algo, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("More Grouping (Loose)", color = Leaf, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Similarity Cutoff", color = Leaf, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         Text(
                             "${(uiState.similarityThreshold * 100).toInt()}% Match",
                             color = Coral,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        Text("Strict Separate", color = Leaf, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                     }
 
                     Slider(
                         value = uiState.similarityThreshold,
                         onValueChange = { viewModel.setSimilarityThreshold(it) },
-                        valueRange = 0.60f..0.92f,
+                        valueRange = 0.10f..0.85f,
                         colors = SliderDefaults.colors(
                             thumbColor = Coral,
                             activeTrackColor = Leaf,
@@ -497,11 +608,11 @@ fun GalleryScreen(viewModel: GalleryViewModel) {
             uiState.isScanning -> ScanState(uiState.completed, uiState.total)
             uiState.hasError -> EmptyState(
                 title = "Couldn't scan photos.",
-                message = "Check photo access or folder permissions and try again.",
+                message = uiState.errorMessage ?: "Check server connection and settings, then try again.",
                 primaryAction = "Try again",
                 onPrimaryAction = viewModel::scan,
-                secondaryAction = "Select folder",
-                onSecondaryAction = { folderPickerLauncher.launch(null) },
+                secondaryAction = "Server Settings",
+                onSecondaryAction = { showSettingsSheet = true },
             )
             !uiState.hasScanned -> ScanState(uiState.completed, uiState.total)
             selectedGroup != null -> PhotoGrid(

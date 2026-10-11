@@ -1,161 +1,207 @@
 package com.Rsq.picsort
 
-import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Rect
 import android.net.Uri
-import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.MediaStore
-import android.util.Size
 import androidx.core.graphics.scale
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.face.Face
-import com.google.mlkit.vision.face.FaceDetection
-import com.google.mlkit.vision.face.FaceDetector
-import com.google.mlkit.vision.face.FaceDetectorOptions
-import com.google.mlkit.vision.face.FaceLandmark
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.math.PI
-import kotlin.math.atan2
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.sqrt
 
-class GalleryScanner(private val context: Context) {
+class GalleryScanner(
+    private val context: Context,
+    private val serverClient: FaceServerClient = FaceServerClient(),
+) {
     private val cacheManager = ScanCacheManager(context)
 
     suspend fun scan(
         folderUri: Uri? = null,
+        serverUrl: String,
+        apiKey: String,
         threshold: Float = 0.45f,
+        clusteringAlgo: String = "chinese_whispers",
         onProgress: (Int, Int) -> Unit,
     ): ScanResult = withContext(Dispatchers.IO) {
         val photos = if (folderUri != null) queryFolderPhotos(folderUri) else queryPhotos()
         if (photos.isEmpty()) return@withContext ScanResult(emptyList(), emptyList())
 
-        val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-            .build()
-
-        val concurrencyLimit = Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
-        val detectorPool = ConcurrentLinkedQueue<FaceDetector>()
-
-        fun acquireDetector(): FaceDetector = detectorPool.poll() ?: FaceDetection.getClient(options)
-        fun releaseDetector(detector: FaceDetector) { detectorPool.offer(detector) }
-
-        val clusterer = FaceClusterer(threshold)
         val descriptorCache = ConcurrentHashMap(cacheManager.loadDescriptorCache())
+        val missingPhotos = photos.filter { !descriptorCache.containsKey(it.uri.toString()) }
+
+        // Fail fast if server is offline when we need to analyze new photos
+        if (missingPhotos.isNotEmpty()) {
+            try {
+                serverClient.getHealth(serverUrl, apiKey)
+            } catch (e: Exception) {
+                val msg = when (e) {
+                    is ServerApiException -> "Server error (${e.statusCode}): ${e.message}"
+                    else -> "Server at $serverUrl is offline or unreachable (${e.localizedMessage ?: "Connection refused"}). Check Server Settings."
+                }
+                throw java.io.IOException(msg, e)
+            }
+        }
+
         val cacheUpdated = AtomicBoolean(false)
         val completedCount = AtomicInteger(0)
+        val concurrencyLimit = 4
         val semaphore = Semaphore(concurrencyLimit)
 
-        val embeddingModel = try { FaceEmbeddingModel(context) } catch (_: Exception) { null }
-
-        try {
-            coroutineScope {
-                photos.map { photo ->
-                    async(Dispatchers.Default) {
-                        semaphore.withPermit {
-                            val cacheKey = photo.uri.toString()
-                            val cachedDescriptors = descriptorCache[cacheKey]
-
-                            if (cachedDescriptors != null) {
-                                cachedDescriptors.forEach { descriptor ->
-                                    clusterer.add(descriptor, photo)
+        coroutineScope {
+            photos.map { photo ->
+                async(Dispatchers.IO) {
+                    semaphore.withPermit {
+                        val cacheKey = photo.uri.toString()
+                        if (!descriptorCache.containsKey(cacheKey)) {
+                            val jpegBytes = loadCompressedJpeg(photo)
+                            val descriptors = if (jpegBytes != null) {
+                                try {
+                                    serverClient.analyzeFace(
+                                        imageBytes = jpegBytes,
+                                        baseUrl = serverUrl,
+                                        apiKey = apiKey,
+                                    )
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                    emptyList()
                                 }
                             } else {
-                                val bitmap: Bitmap? = runCatching<Bitmap?> {
-                                    loadThumbnail(photo)
-                                }.getOrNull()
-
-                                val newDescriptors = mutableListOf<FloatArray>()
-                                if (bitmap != null) {
-                                    val detector = acquireDetector()
-                                    val faces: List<Face>? = try {
-                                        detector.process(InputImage.fromBitmap(bitmap, 0)).await()
-                                    } catch (_: Exception) {
-                                        null
-                                    } finally {
-                                        releaseDetector(detector)
-                                    }
-
-                                    faces?.forEach { face ->
-                                        faceDescriptor(bitmap, face, embeddingModel)?.let { descriptor ->
-                                            clusterer.add(descriptor, photo)
-                                            newDescriptors.add(descriptor)
-                                        }
-                                    }
-                                }
-                                descriptorCache[cacheKey] = newDescriptors
-                                cacheUpdated.set(true)
+                                emptyList()
                             }
+                            descriptorCache[cacheKey] = descriptors
+                            cacheUpdated.set(true)
+                        }
 
-                            val done = completedCount.incrementAndGet()
-                            if (done % 10 == 0 || done == photos.size) {
-                                withContext(Dispatchers.Main) { onProgress(done, photos.size) }
-                            }
+                        val done = completedCount.incrementAndGet()
+                        if (done % 5 == 0 || done == photos.size) {
+                            withContext(Dispatchers.Main) { onProgress(done, photos.size) }
                         }
                     }
-                }.awaitAll()
-            }
+                }
+            }.awaitAll()
+        }
 
-            if (cacheUpdated.get()) {
-                cacheManager.saveDescriptorCache(descriptorCache)
-            }
-        } finally {
-            embeddingModel?.close()
-            while (true) {
-                val d = detectorPool.poll() ?: break
-                try {
-                    d.close()
-                } catch (_: Exception) {}
+        if (cacheUpdated.get()) {
+            cacheManager.saveDescriptorCache(descriptorCache)
+        }
+
+        val groups = recluster(photos, descriptorCache, serverUrl, apiKey, threshold, clusteringAlgo)
+        ScanResult(photos, groups)
+    }
+
+    suspend fun recluster(
+        photos: List<GalleryPhoto>,
+        serverUrl: String,
+        apiKey: String,
+        threshold: Float,
+        clusteringAlgo: String,
+    ): List<PersonGroup> = withContext(Dispatchers.IO) {
+        val descriptorCache = cacheManager.loadDescriptorCache()
+        recluster(photos, descriptorCache, serverUrl, apiKey, threshold, clusteringAlgo)
+    }
+
+    private suspend fun recluster(
+        photos: List<GalleryPhoto>,
+        descriptorCache: Map<String, List<FloatArray>>,
+        serverUrl: String,
+        apiKey: String,
+        threshold: Float,
+        clusteringAlgo: String,
+    ): List<PersonGroup> = withContext(Dispatchers.IO) {
+        val allEmbeddings = mutableListOf<FloatArray>()
+        val photoIndices = mutableListOf<GalleryPhoto>()
+
+        for (photo in photos) {
+            val descriptors = descriptorCache[photo.uri.toString()] ?: continue
+            for (descriptor in descriptors) {
+                allEmbeddings.add(descriptor)
+                photoIndices.add(photo)
             }
         }
 
-        ScanResult(photos, clusterer.groups())
+        if (allEmbeddings.isEmpty()) {
+            return@withContext emptyList()
+        }
+
+        val clusterResult = try {
+            serverClient.groupClusters(
+                embeddings = allEmbeddings,
+                threshold = threshold,
+                algo = clusteringAlgo,
+                baseUrl = serverUrl,
+                apiKey = apiKey,
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return@withContext emptyList()
+        }
+
+        val groupMap = mutableMapOf<Int, LinkedHashMap<Long, GalleryPhoto>>()
+        for (i in clusterResult.labels.indices) {
+            val label = clusterResult.labels[i]
+            if (label >= 0) {
+                val photo = photoIndices[i]
+                groupMap.getOrPut(label) { LinkedHashMap() }[photo.id] = photo
+            }
+        }
+
+        groupMap.entries
+            .sortedByDescending { it.value.size }
+            .mapIndexed { index, entry ->
+                PersonGroup(index, entry.value.values.toList())
+            }
     }
 
-    private fun loadThumbnail(photo: GalleryPhoto): Bitmap? {
+    private fun loadCompressedJpeg(photo: GalleryPhoto, maxDimension: Int = 1280): ByteArray? {
         val resolver = context.contentResolver
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                resolver.loadThumbnail(photo.uri, Size(320, 320), null)
-            } else {
-                decodeSampledBitmapFromUri(resolver, photo.uri, 320, 320)
-            }
-        } catch (_: Exception) {
-            decodeSampledBitmapFromUri(resolver, photo.uri, 320, 320)
-        }
-    }
-
-    private fun decodeSampledBitmapFromUri(resolver: ContentResolver, uri: Uri, reqWidth: Int, reqHeight: Int): Bitmap? {
-        return try {
             val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            resolver.openInputStream(uri)?.use { stream ->
+            resolver.openInputStream(photo.uri)?.use { stream ->
                 BitmapFactory.decodeStream(stream, null, options)
             }
             if (options.outWidth <= 0 || options.outHeight <= 0) return null
-            options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
-            options.inJustDecodeBounds = false
-            resolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, options)
+
+            val sampleSize = calculateInSampleSize(options, maxDimension, maxDimension)
+            val decodeOptions = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inJustDecodeBounds = false
             }
-        } catch (_: Exception) {
+
+            val bitmap = resolver.openInputStream(photo.uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, decodeOptions)
+            } ?: return null
+
+            val scaledBitmap = if (bitmap.width > maxDimension || bitmap.height > maxDimension) {
+                val scale = maxDimension.toFloat() / maxOf(bitmap.width, bitmap.height)
+                val newW = (bitmap.width * scale).toInt().coerceAtLeast(1)
+                val newH = (bitmap.height * scale).toInt().coerceAtLeast(1)
+                val scaled = bitmap.scale(newW, newH, filter = true)
+                if (scaled != bitmap) bitmap.recycle()
+                scaled
+            } else {
+                bitmap
+            }
+
+            val outputStream = ByteArrayOutputStream()
+            scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
+            if (scaledBitmap != bitmap) {
+                scaledBitmap.recycle()
+            }
+
+            outputStream.toByteArray()
+        } catch (e: Exception) {
+            e.printStackTrace()
             null
         }
     }
@@ -229,89 +275,5 @@ class GalleryScanner(private val context: Context) {
                 }
             }
         }
-    }
-
-    private fun faceDescriptor(bitmap: Bitmap, face: Face, embeddingModel: FaceEmbeddingModel?): FloatArray? {
-        val bounds = face.boundingBox
-        val paddingX = (bounds.width() * 0.15f).toInt()
-        val paddingY = (bounds.height() * 0.15f).toInt()
-        val left = max(0, bounds.left - paddingX)
-        val top = max(0, bounds.top - paddingY)
-        val right = min(bitmap.width, bounds.right + paddingX)
-        val bottom = min(bitmap.height, bounds.bottom + paddingY)
-        if (right - left < 16 || bottom - top < 16) return null
-
-        val faceCrop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-
-        val onnxEmbedding = embeddingModel?.getEmbedding(faceCrop)
-        if (onnxEmbedding != null) {
-            return onnxEmbedding
-        }
-
-        return fallbackFaceDescriptor(faceCrop, face, bounds)
-    }
-
-    private fun fallbackFaceDescriptor(faceCrop: Bitmap, face: Face, bounds: Rect): FloatArray {
-        val geoFeatures = extractGeometricFeatures(face, bounds)
-        val scaled = faceCrop.scale(32, 32, filter = true)
-        val pixels = IntArray(1024)
-        scaled.getPixels(pixels, 0, 32, 0, 0, 32, 32)
-
-        val gray = FloatArray(1024) { index ->
-            val color = pixels[index]
-            (0.299f * ((color shr 16) and 0xff) +
-                0.587f * ((color shr 8) and 0xff) +
-                0.114f * (color and 0xff)) / 255f
-        }
-
-        val hog = FloatArray(8 * 8 * 8)
-        for (y in 1 until 31) {
-            for (x in 1 until 31) {
-                val dx = gray[y * 32 + x + 1] - gray[y * 32 + x - 1]
-                val dy = gray[(y + 1) * 32 + x] - gray[(y - 1) * 32 + x]
-                val magnitude = sqrt(dx * dx + dy * dy)
-                val angle = (atan2(dy, dx) + PI.toFloat()) % PI.toFloat()
-                val bin = (angle / PI.toFloat() * 8).toInt().coerceIn(0, 7)
-                val cell = ((y / 4) * 8 + x / 4) * 8 + bin
-                hog[cell] += magnitude
-            }
-        }
-
-        val rawDescriptor = geoFeatures + hog
-        val length = sqrt(rawDescriptor.sumOf { (it * it).toDouble() }).toFloat().coerceAtLeast(0.001f)
-        return FloatArray(rawDescriptor.size) { rawDescriptor[it] / length }
-    }
-
-    private fun extractGeometricFeatures(face: Face, bounds: Rect): FloatArray {
-        val geo = FloatArray(16)
-        val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)?.position
-        val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)?.position
-        val nose = face.getLandmark(FaceLandmark.NOSE_BASE)?.position
-        val mouthLeft = face.getLandmark(FaceLandmark.MOUTH_LEFT)?.position
-        val mouthRight = face.getLandmark(FaceLandmark.MOUTH_RIGHT)?.position
-
-        if (leftEye != null && rightEye != null && nose != null && mouthLeft != null && mouthRight != null) {
-            val eyeDist = distance(leftEye.x, leftEye.y, rightEye.x, rightEye.y).coerceAtLeast(1f)
-            val eyeCenterX = (leftEye.x + rightEye.x) / 2f
-            val eyeCenterY = (leftEye.y + rightEye.y) / 2f
-            val mouthCenterX = (mouthLeft.x + mouthRight.x) / 2f
-            val mouthCenterY = (mouthLeft.y + mouthRight.y) / 2f
-
-            geo[0] = distance(eyeCenterX, eyeCenterY, nose.x, nose.y) / eyeDist
-            geo[1] = distance(nose.x, nose.y, mouthCenterX, mouthCenterY) / eyeDist
-            geo[2] = distance(mouthLeft.x, mouthLeft.y, mouthRight.x, mouthRight.y) / eyeDist
-            geo[3] = distance(leftEye.x, leftEye.y, nose.x, nose.y) / eyeDist
-            geo[4] = distance(rightEye.x, rightEye.y, nose.x, nose.y) / eyeDist
-            geo[5] = distance(leftEye.x, leftEye.y, mouthLeft.x, mouthLeft.y) / eyeDist
-            geo[6] = distance(rightEye.x, rightEye.y, mouthRight.x, mouthRight.y) / eyeDist
-            geo[7] = bounds.width().toFloat() / bounds.height().toFloat()
-        }
-        return geo
-    }
-
-    private fun distance(x1: Float, y1: Float, x2: Float, y2: Float): Float {
-        val dx = x2 - x1
-        val dy = y2 - y1
-        return sqrt(dx * dx + dy * dy)
     }
 }

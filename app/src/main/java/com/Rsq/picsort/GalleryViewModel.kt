@@ -27,6 +27,15 @@ data class ExportState(
     val message: String? = null,
 )
 
+data class ServerHealthStatus(
+    val isConnected: Boolean = false,
+    val isLoading: Boolean = false,
+    val detector: String? = null,
+    val embedder: String? = null,
+    val embeddingDim: Int? = null,
+    val errorMessage: String? = null,
+)
+
 data class GalleryUiState(
     val hasScanned: Boolean = false,
     val isScanning: Boolean = false,
@@ -35,15 +44,22 @@ data class GalleryUiState(
     val photos: List<GalleryPhoto> = emptyList(),
     val groups: List<PersonGroup> = emptyList(),
     val hasError: Boolean = false,
+    val errorMessage: String? = null,
     val selectedFolderUri: Uri? = null,
     val selectedFolderName: String? = null,
     val exportState: ExportState = ExportState(),
-    val similarityThreshold: Float = 0.48f,
+    val similarityThreshold: Float = 0.45f,
+    val serverUrl: String = "http://10.0.2.2:8000",
+    val apiKey: String = "",
+    val clusteringAlgo: String = "chinese_whispers",
+    val availableAlgos: List<String> = listOf("chinese_whispers", "dbscan"),
+    val serverHealth: ServerHealthStatus = ServerHealthStatus(),
 )
 
 class GalleryViewModel(
     private val application: Application,
     private val galleryScanner: GalleryScanner,
+    private val serverClient: FaceServerClient = FaceServerClient(),
 ) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences("picsort_prefs", Context.MODE_PRIVATE)
@@ -53,11 +69,16 @@ class GalleryViewModel(
     val uiState = _uiState.asStateFlow()
 
     init {
-        loadSavedFolderAndCache()
+        loadSavedSettingsAndCache()
+        checkServerConnection()
     }
 
-    private fun loadSavedFolderAndCache() {
-        val threshold = prefs.getFloat("similarity_threshold", 0.48f)
+    private fun loadSavedSettingsAndCache() {
+        val threshold = prefs.getFloat("similarity_threshold", 0.45f)
+        val serverUrl = prefs.getString("server_url", "http://10.0.2.2:8000") ?: "http://10.0.2.2:8000"
+        val apiKey = prefs.getString("api_key", "") ?: ""
+        val algo = prefs.getString("clustering_algo", "chinese_whispers") ?: "chinese_whispers"
+
         val savedUriString = prefs.getString("selected_folder_uri", null)
         var selectedFolderUri: Uri? = null
         var selectedFolderName: String? = null
@@ -86,32 +107,97 @@ class GalleryViewModel(
                 groups = cachedResult?.groups ?: emptyList(),
                 hasScanned = cachedResult != null,
                 similarityThreshold = threshold,
+                serverUrl = serverUrl,
+                apiKey = apiKey,
+                clusteringAlgo = algo,
             )
         }
+    }
+
+    fun checkServerConnection() {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(serverHealth = it.serverHealth.copy(isLoading = true, errorMessage = null))
+            }
+            val currentUrl = _uiState.value.serverUrl
+            val currentApiKey = _uiState.value.apiKey
+
+            try {
+                val health = serverClient.getHealth(currentUrl, currentApiKey)
+                val algosResp = runCatching {
+                    serverClient.getClusterAlgos(currentUrl, currentApiKey)
+                }.getOrNull()
+
+                val algos = algosResp?.algos?.map { it.name } ?: listOf("chinese_whispers", "dbscan")
+
+                _uiState.update {
+                    it.copy(
+                        availableAlgos = algos,
+                        serverHealth = ServerHealthStatus(
+                            isConnected = true,
+                            isLoading = false,
+                            detector = health.detector,
+                            embedder = health.embedder,
+                            embeddingDim = health.embeddingDim,
+                            errorMessage = null,
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        serverHealth = ServerHealthStatus(
+                            isConnected = false,
+                            isLoading = false,
+                            errorMessage = e.message ?: "Failed to connect to server",
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun setServerUrl(url: String) {
+        prefs.edit().putString("server_url", url).apply()
+        _uiState.update { it.copy(serverUrl = url) }
+        checkServerConnection()
+    }
+
+    fun setApiKey(key: String) {
+        prefs.edit().putString("api_key", key).apply()
+        _uiState.update { it.copy(apiKey = key) }
+        checkServerConnection()
+    }
+
+    fun setClusteringAlgo(algo: String) {
+        prefs.edit().putString("clustering_algo", algo).apply()
+        _uiState.update { it.copy(clusteringAlgo = algo) }
+        recluster()
     }
 
     fun setSimilarityThreshold(threshold: Float) {
         prefs.edit().putFloat("similarity_threshold", threshold).apply()
         _uiState.update { it.copy(similarityThreshold = threshold) }
-        recluster(threshold)
+        recluster()
     }
 
-    private fun recluster(threshold: Float) {
+    private fun recluster() {
         val photos = _uiState.value.photos
         if (photos.isEmpty()) return
 
+        val serverUrl = _uiState.value.serverUrl
+        val apiKey = _uiState.value.apiKey
+        val threshold = _uiState.value.similarityThreshold
+        val algo = _uiState.value.clusteringAlgo
+
         viewModelScope.launch(Dispatchers.IO) {
-            val descriptorCache = cacheManager.loadDescriptorCache()
-            val clusterer = FaceClusterer(threshold)
-
-            photos.forEach { photo ->
-                val descriptors = descriptorCache[photo.uri.toString()]
-                descriptors?.forEach { descriptor ->
-                    clusterer.add(descriptor, photo)
-                }
-            }
-
-            val groups = clusterer.groups()
+            val groups = galleryScanner.recluster(
+                photos = photos,
+                serverUrl = serverUrl,
+                apiKey = apiKey,
+                threshold = threshold,
+                clusteringAlgo = algo,
+            )
             _uiState.update { it.copy(groups = groups) }
 
             val sourceKey = _uiState.value.selectedFolderUri?.toString() ?: "all_photos"
@@ -160,24 +246,45 @@ class GalleryViewModel(
 
         val folderUri = _uiState.value.selectedFolderUri
         val threshold = _uiState.value.similarityThreshold
+        val serverUrl = _uiState.value.serverUrl
+        val apiKey = _uiState.value.apiKey
+        val algo = _uiState.value.clusteringAlgo
         val sourceKey = folderUri?.toString() ?: "all_photos"
 
         viewModelScope.launch {
             _uiState.update {
-                it.copy(isScanning = true, hasError = false, completed = 0, total = 0)
+                it.copy(
+                    isScanning = true,
+                    hasError = false,
+                    errorMessage = null,
+                    completed = 0,
+                    total = 0,
+                )
             }
             try {
-                val result = galleryScanner.scan(folderUri, threshold) { completed, total ->
+                val result = galleryScanner.scan(
+                    folderUri = folderUri,
+                    serverUrl = serverUrl,
+                    apiKey = apiKey,
+                    threshold = threshold,
+                    clusteringAlgo = algo,
+                ) { completed, total ->
                     _uiState.update { it.copy(completed = completed, total = total) }
                 }
+
                 cacheManager.saveScanResult(sourceKey, result)
                 _uiState.update {
                     it.copy(photos = result.photos, groups = result.groups, hasScanned = true)
                 }
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Exception) {
-                _uiState.update { it.copy(hasError = true) }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        hasError = true,
+                        errorMessage = e.message ?: "Error scanning photos with server",
+                    )
+                }
             } finally {
                 _uiState.update { it.copy(isScanning = false) }
             }
@@ -276,7 +383,6 @@ class GalleryViewModel(
                     }
                 }
 
-                // If photos were moved/deleted, update UI and cache in-memory without scanning
                 if (deleteOriginals && successfullyMovedPhotoIds.isNotEmpty()) {
                     val updatedPhotos = _uiState.value.photos.filterNot { it.id in successfullyMovedPhotoIds }
                     val updatedGroups = _uiState.value.groups.mapNotNull { group ->
@@ -365,7 +471,9 @@ class GalleryViewModel(
                 throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
             }
             @Suppress("UNCHECKED_CAST")
-            return GalleryViewModel(application, GalleryScanner(application)) as T
+            val serverClient = FaceServerClient()
+            val scanner = GalleryScanner(application, serverClient)
+            return GalleryViewModel(application, scanner, serverClient) as T
         }
     }
 }
