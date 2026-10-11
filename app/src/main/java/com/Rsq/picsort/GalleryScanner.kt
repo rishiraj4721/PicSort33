@@ -41,7 +41,7 @@ class GalleryScanner(private val context: Context) {
 
     suspend fun scan(
         folderUri: Uri? = null,
-        threshold: Float = 0.82f,
+        threshold: Float = 0.45f,
         onProgress: (Int, Int) -> Unit,
     ): ScanResult = withContext(Dispatchers.IO) {
         val photos = if (folderUri != null) queryFolderPhotos(folderUri) else queryPhotos()
@@ -63,6 +63,8 @@ class GalleryScanner(private val context: Context) {
         val cacheUpdated = AtomicBoolean(false)
         val completedCount = AtomicInteger(0)
         val semaphore = Semaphore(concurrencyLimit)
+
+        val embeddingModel = try { FaceEmbeddingModel(context) } catch (_: Exception) { null }
 
         try {
             coroutineScope {
@@ -93,7 +95,7 @@ class GalleryScanner(private val context: Context) {
                                     }
 
                                     faces?.forEach { face ->
-                                        faceDescriptor(bitmap, face)?.let { descriptor ->
+                                        faceDescriptor(bitmap, face, embeddingModel)?.let { descriptor ->
                                             clusterer.add(descriptor, photo)
                                             newDescriptors.add(descriptor)
                                         }
@@ -116,6 +118,7 @@ class GalleryScanner(private val context: Context) {
                 cacheManager.saveDescriptorCache(descriptorCache)
             }
         } finally {
+            embeddingModel?.close()
             while (true) {
                 val d = detectorPool.poll() ?: break
                 try {
@@ -228,7 +231,7 @@ class GalleryScanner(private val context: Context) {
         }
     }
 
-    private fun faceDescriptor(bitmap: Bitmap, face: Face): FloatArray? {
+    private fun faceDescriptor(bitmap: Bitmap, face: Face, embeddingModel: FaceEmbeddingModel?): FloatArray? {
         val bounds = face.boundingBox
         val paddingX = (bounds.width() * 0.15f).toInt()
         val paddingY = (bounds.height() * 0.15f).toInt()
@@ -238,9 +241,18 @@ class GalleryScanner(private val context: Context) {
         val bottom = min(bitmap.height, bounds.bottom + paddingY)
         if (right - left < 16 || bottom - top < 16) return null
 
-        val geoFeatures = extractGeometricFeatures(face, bounds)
-
         val faceCrop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+
+        val onnxEmbedding = embeddingModel?.getEmbedding(faceCrop)
+        if (onnxEmbedding != null) {
+            return onnxEmbedding
+        }
+
+        return fallbackFaceDescriptor(faceCrop, face, bounds)
+    }
+
+    private fun fallbackFaceDescriptor(faceCrop: Bitmap, face: Face, bounds: Rect): FloatArray {
+        val geoFeatures = extractGeometricFeatures(face, bounds)
         val scaled = faceCrop.scale(32, 32, filter = true)
         val pixels = IntArray(1024)
         scaled.getPixels(pixels, 0, 32, 0, 0, 32, 32)

@@ -2,7 +2,7 @@ package com.Rsq.picsort
 
 import kotlin.math.min
 
-class FaceClusterer(private val threshold: Float = 0.82f) {
+class FaceClusterer(private val threshold: Float = 0.45f) {
     private data class Cluster(
         val exemplars: MutableList<FloatArray>,
         val photos: LinkedHashMap<Long, GalleryPhoto>,
@@ -36,7 +36,7 @@ class FaceClusterer(private val threshold: Float = 0.82f) {
         // Keep distinct facial angles/expressions as additional exemplars
         if (bestCluster.exemplars.size < 6) {
             val minSimToExemplars = bestCluster.exemplars.minOf { cosineSimilarity(descriptor, it) }
-            if (minSimToExemplars < 0.94f) {
+            if (minSimToExemplars < 0.85f) {
                 bestCluster.exemplars.add(descriptor.copyOf())
             }
         }

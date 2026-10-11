@@ -38,7 +38,7 @@ data class GalleryUiState(
     val selectedFolderUri: Uri? = null,
     val selectedFolderName: String? = null,
     val exportState: ExportState = ExportState(),
-    val similarityThreshold: Float = 0.78f,
+    val similarityThreshold: Float = 0.48f,
 )
 
 class GalleryViewModel(
@@ -57,7 +57,7 @@ class GalleryViewModel(
     }
 
     private fun loadSavedFolderAndCache() {
-        val threshold = prefs.getFloat("similarity_threshold", 0.78f)
+        val threshold = prefs.getFloat("similarity_threshold", 0.48f)
         val savedUriString = prefs.getString("selected_folder_uri", null)
         var selectedFolderUri: Uri? = null
         var selectedFolderName: String? = null

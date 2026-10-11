@@ -50,6 +50,7 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.face.detection)
     implementation(libs.kotlinx.coroutines.play.services)
+    implementation(libs.onnxruntime.android)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
